@@ -1,60 +1,49 @@
 #pragma once
 
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <utility>
 #include <vector>
+#include <cmath>
+#include <algorithm>
 
-// Log-spaced binning for FFT magnitudes (visualization friendly).
-struct LogBins final {
-  // Returns logBins values derived from `mag`, which is typically `fftSize/2`
-  // bins of linear magnitude (k = 0..fftSize/2-1).
-  static std::vector<float> compute(const std::vector<float>& mag,
-                                    int sampleRate,
-                                    int fftSize,
-                                    int logBins,
-                                    float fMin = 20.0f) {
-    if (sampleRate <= 0) sampleRate = 48000;
-    if (fftSize <= 0) fftSize = 2048;
-    if (logBins <= 0) logBins = 64;
+class LogBins {
+public:
+    static std::vector<float> compute(
+        const std::vector<float>& fftMag,
+        int sampleRate,
+        int fftSize,
+        int numBins
+    ) {
+        std::vector<float> out(numBins, 0.0f);
 
-    const float nyquist = 0.5f * static_cast<float>(sampleRate);
-    const float minHz = std::min(std::max(1.0f, fMin), nyquist);
-    const float maxHz = std::max(minHz, nyquist);
+        float fMin = 20.0f;
+        float fMax = sampleRate * 0.5f;
 
-    std::vector<float> out(static_cast<std::size_t>(logBins), 0.0f);
-    if (mag.empty()) return out;
+        for (int i = 0; i < numBins; i++) {
+            float a = float(i) / numBins;
+            float b = float(i + 1) / numBins;
 
-    const float logMin = std::log10(minHz);
-    const float logMax = std::log10(maxHz);
-    const float step = (logMax - logMin) / static_cast<float>(logBins);
-    const float hzPerBin = static_cast<float>(sampleRate) / static_cast<float>(fftSize);
+            float fLow  = fMin * std::pow(fMax / fMin, a);
+            float fHigh = fMin * std::pow(fMax / fMin, b);
 
-    for (int i = 0; i < logBins; ++i) {
-      const float a = static_cast<float>(i) / static_cast<float>(logBins);
-      const float b = static_cast<float>(i + 1) / static_cast<float>(logBins);
-      (void)a;
-      (void)b;
+            int binLow = std::max(
+                0, int(std::floor(fLow * fftSize / sampleRate))
+            );
+            int binHigh = std::min(
+                int(fftMag.size()) - 1,
+                int(std::ceil(fHigh * fftSize / sampleRate))
+            );
 
-      const float fLow = std::pow(10.0f, logMin + step * static_cast<float>(i));
-      const float fHigh = std::pow(10.0f, logMin + step * static_cast<float>(i + 1));
+            float sum = 0.0f;
+            int count = 0;
 
-      const int binLo = std::max(0, static_cast<int>(std::floor(fLow / hzPerBin)));
-      const int binHi = std::min(static_cast<int>(mag.size()) - 1,
-                                 static_cast<int>(std::ceil(std::min(fHigh, nyquist) / hzPerBin)));
-      if (binHi < binLo) continue;
+            for (int b = binLow; b <= binHigh; b++) {
+                sum += fftMag[b];
+                count++;
+            }
 
-      float acc = 0.0f;
-      int count = 0;
-      for (int k = binLo; k <= binHi; ++k) {
-        acc += mag[static_cast<std::size_t>(k)];
-        ++count;
-      }
-      out[static_cast<std::size_t>(i)] = (count > 0) ? (acc / static_cast<float>(count)) : 0.0f;
+            out[i] = (count > 0) ? sum / count : 0.0f;
+        }
+
+        return out;
     }
-
-    return out;
-  }
 };
 
