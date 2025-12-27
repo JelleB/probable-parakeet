@@ -1,196 +1,222 @@
 #include "AudioEngine.hpp"
-
 #include "LogBins.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
-#include <vector>
+
+#if __has_include(<portaudio.h>)
+#include <portaudio.h>
+#define AUDIOENGINE_HAS_PORTAUDIO 1
+#else
+#define AUDIOENGINE_HAS_PORTAUDIO 0
+struct PaStream;
+struct PaStreamCallbackTimeInfo;
+using PaStreamCallbackFlags = unsigned long;
+#endif
+
+#if __has_include(<kissfft/kiss_fftr.h>)
+#include <kissfft/kiss_fftr.h>
+#define AUDIOENGINE_HAS_KISSFFT 1
+#else
+#define AUDIOENGINE_HAS_KISSFFT 0
+using kiss_fftr_cfg = void*;
+struct kiss_fft_cpx { float r; float i; };
+#endif
 
 namespace {
-
 constexpr float kPi = 3.14159265358979323846f;
-
-bool isPowerOfTwo(int n) { return n > 0 && (n & (n - 1)) == 0; }
-
-void fftInPlace(std::vector<std::complex<float>>& a) {
-  const std::size_t n = a.size();
-  if (n == 0) return;
-
-  // Bit reversal permutation
-  for (std::size_t i = 1, j = 0; i < n; ++i) {
-    std::size_t bit = n >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
-    if (i < j) std::swap(a[i], a[j]);
-  }
-
-  // Cooley-Tukey
-  for (std::size_t len = 2; len <= n; len <<= 1) {
-    const float ang = -2.0f * kPi / static_cast<float>(len);
-    const std::complex<float> wlen(std::cos(ang), std::sin(ang));
-    for (std::size_t i = 0; i < n; i += len) {
-      std::complex<float> w(1.0f, 0.0f);
-      for (std::size_t j = 0; j < len / 2; ++j) {
-        const std::complex<float> u = a[i + j];
-        const std::complex<float> v = a[i + j + len / 2] * w;
-        a[i + j] = u + v;
-        a[i + j + len / 2] = u - v;
-        w *= wlen;
-      }
-    }
-  }
-}
-
-void applyHannWindow(std::vector<float>& x) {
-  const std::size_t n = x.size();
-  if (n <= 1) return;
-  for (std::size_t i = 0; i < n; ++i) {
-    const float w = 0.5f * (1.0f - std::cos(2.0f * kPi * static_cast<float>(i) /
-                                           static_cast<float>(n - 1)));
-    x[i] *= w;
-  }
-}
-
-// Convert a linear magnitude to a 0..1 "meter" value.
-float magToMeter(float mag) {
-  const float db = 20.0f * std::log10(std::max(1.0e-9f, mag));
-  const float floorDb = -80.0f;
-  const float clamped = std::min(0.0f, std::max(floorDb, db));
-  return (clamped - floorDb) / (0.0f - floorDb);
-}
-
 } // namespace
 
 AudioEngine::AudioEngine(int sampleRate_, int fftSize_, int logBins_, const std::string& flacOutputPath)
-    : sampleRate(sampleRate_), fftSize(fftSize_), logBins(logBins_), flacPath(flacOutputPath) {
-  if (sampleRate <= 0) sampleRate = 48000;
-  if (fftSize <= 0) fftSize = 2048;
-  if (logBins <= 0) logBins = 64;
-  if (!isPowerOfTwo(fftSize)) {
-    throw std::invalid_argument("fftSize must be a power of two");
-  }
+    : sampleRate(sampleRate_),
+      fftSize(fftSize_),
+      logBins(logBins_),
+      flacPath(flacOutputPath),
+      flacEnabled(!flacOutputPath.empty()) {
+    if (sampleRate <= 0) sampleRate = 48000;
+    if (fftSize <= 0) fftSize = 2048;
+    if (logBins <= 0) logBins = 64;
 
-  latestLog.assign(static_cast<std::size_t>(logBins), 0.0f);
-  captureBuffer.assign(static_cast<std::size_t>(fftSize), 0.0f);
-
-  flacEnabled = !flacPath.empty();
-  if (flacEnabled) initFlac();
+    latestLog.resize(static_cast<std::size_t>(logBins), 0.0f);
+    captureBuffer.resize(static_cast<std::size_t>(fftSize), 0.0f);
 }
 
 AudioEngine::~AudioEngine() {
   stop();
-  closeFlac();
 }
 
 void AudioEngine::start() {
-  bool expected = false;
-  if (!running.compare_exchange_strong(expected, true)) return;
-  audioThread = std::thread(&AudioEngine::audioThreadFunc, this);
+    if (running.load()) return;
+    running = true;
+
+#if AUDIOENGINE_HAS_PORTAUDIO
+    Pa_Initialize();
+#else
+    // Still start a thread so the app doesn't hang, but it will error immediately.
+#endif
+
+    if (flacEnabled) initFlac();
+    audioThread = std::thread(&AudioEngine::audioThreadFunc, this);
 }
 
 void AudioEngine::stop() {
-  bool expected = true;
-  if (!running.compare_exchange_strong(expected, false)) return;
-  if (audioThread.joinable()) audioThread.join();
+    if (!running.load()) return;
+    running = false;
+
+    if (audioThread.joinable()) audioThread.join();
+
+    if (flacEnabled) closeFlac();
+
+#if AUDIOENGINE_HAS_PORTAUDIO
+    Pa_Terminate();
+#endif
 }
 
 std::vector<float> AudioEngine::getLogBins() {
-  std::scoped_lock lk(logMutex);
-  return latestLog;
-}
-
-std::vector<float> AudioEngine::getLogBinCenters() const {
-  LogBins lb(LogBins::Config{.sampleRate = sampleRate, .fftSize = fftSize, .bins = logBins, .minHz = 20.0f});
-  return lb.centersHz();
+    std::lock_guard<std::mutex> lock(logMutex);
+    return latestLog;
 }
 
 std::vector<std::pair<float, float>> AudioEngine::computeLogBinFreqs() const {
-  LogBins lb(LogBins::Config{.sampleRate = sampleRate, .fftSize = fftSize, .bins = logBins, .minHz = 20.0f});
-  return lb.edgesHz();
+    std::vector<std::pair<float, float>> out;
+    out.reserve(static_cast<std::size_t>(logBins));
+
+    const float fMin = 20.0f;
+    const float fMax = static_cast<float>(sampleRate) * 0.5f;
+
+    for (int i = 0; i < logBins; i++) {
+        const float a = static_cast<float>(i) / static_cast<float>(logBins);
+        const float b = static_cast<float>(i + 1) / static_cast<float>(logBins);
+
+        const float fLow  = fMin * std::pow(fMax / fMin, a);
+        const float fHigh = fMin * std::pow(fMax / fMin, b);
+
+        out.emplace_back(fLow, fHigh);
+    }
+    return out;
 }
 
-void AudioEngine::audioThreadFunc() {
-  using clock = std::chrono::steady_clock;
+std::vector<float> AudioEngine::getLogBinCenters() const {
+    auto ranges = computeLogBinFreqs();
+    std::vector<float> centers;
+    centers.reserve(ranges.size());
 
-  // Simple synthetic signal: sine tone that sweeps slowly.
-  float phase = 0.0f;
-  float toneHz = 220.0f;
-  float sweepDir = 1.0f;
-  const float amp = 0.2f;
+    for (const auto& r : ranges)
+        centers.push_back(std::sqrt(r.first * r.second));
 
-  LogBins lb(LogBins::Config{.sampleRate = sampleRate, .fftSize = fftSize, .bins = logBins, .minHz = 20.0f});
+    return centers;
+}
 
-  std::vector<float> frame(static_cast<std::size_t>(fftSize), 0.0f);
-  std::vector<std::complex<float>> fftBuf(static_cast<std::size_t>(fftSize));
-  std::vector<float> mags(static_cast<std::size_t>(fftSize / 2 + 1), 0.0f);
-  std::vector<std::int32_t> pcm32(static_cast<std::size_t>(fftSize), 0);
+#if AUDIOENGINE_HAS_PORTAUDIO
+static int paCallback(
+    const void* input,
+    void*,
+    unsigned long frameCount,
+    const PaStreamCallbackTimeInfo*,
+    PaStreamCallbackFlags,
+    void* userData
+) {
+    auto* eng = static_cast<AudioEngine*>(userData);
+    const float* in = static_cast<const float*>(input);
+    if (!in) return paContinue;
 
-  const auto bufferDur =
-      std::chrono::duration<double>(static_cast<double>(fftSize) / static_cast<double>(sampleRate));
-
-  auto nextTick = clock::now();
-  while (running.load()) {
-    nextTick += std::chrono::duration_cast<clock::duration>(bufferDur);
-
-    // Sweep between 110Hz and 1760Hz for a more interesting display.
-    toneHz += sweepDir * 0.5f;
-    if (toneHz > 1760.0f) { toneHz = 1760.0f; sweepDir = -1.0f; }
-    if (toneHz < 110.0f)  { toneHz = 110.0f;  sweepDir =  1.0f; }
-
-    const float phaseInc = 2.0f * kPi * toneHz / static_cast<float>(sampleRate);
-
-    for (int i = 0; i < fftSize; ++i) {
-      const float s = amp * std::sin(phase);
-      phase += phaseInc;
-      if (phase > 2.0f * kPi) phase -= 2.0f * kPi;
-      frame[static_cast<std::size_t>(i)] = s;
+    // Write to ring buffer (mono).
+    std::size_t writeIdx = eng->captureWriteIdx.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(frameCount); i++) {
+        eng->captureBuffer[writeIdx] = in[i];
+        writeIdx = (writeIdx + 1) % static_cast<std::size_t>(eng->fftSize);
     }
+    eng->captureWriteIdx.store(writeIdx, std::memory_order_relaxed);
 
-    // Capture buffer for potential external use later.
-    captureBuffer = frame;
+    if (eng->flacEnabled && eng->flacEncoder) {
+        std::vector<FLAC__int32> pcm(static_cast<std::size_t>(frameCount));
+        for (std::size_t i = 0; i < static_cast<std::size_t>(frameCount); i++)
+            pcm[i] = static_cast<FLAC__int32>(in[i] * 32767.0f);
 
-    // Optional FLAC dump (mono).
-    if (flacEnabled && flacEncoder) {
-      for (int i = 0; i < fftSize; ++i) {
-        const float s = std::max(-1.0f, std::min(1.0f, frame[static_cast<std::size_t>(i)]));
-        // libFLAC expects signed int32 samples. We'll store 16-bit aligned in int32.
-        const int v = static_cast<int>(std::lrint(s * 32767.0f));
-        pcm32[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(v);
-      }
 #if AUDIOENGINE_HAS_FLAC
-      (void)FLAC__stream_encoder_process_interleaved(flacEncoder, pcm32.data(), static_cast<unsigned>(fftSize));
+        FLAC__stream_encoder_process_interleaved(
+            eng->flacEncoder, pcm.data(), static_cast<unsigned>(frameCount)
+        );
 #endif
     }
 
-    // FFT analysis
-    std::vector<float> windowed = frame;
-    applyHannWindow(windowed);
-    for (int i = 0; i < fftSize; ++i) {
-      fftBuf[static_cast<std::size_t>(i)] = std::complex<float>(windowed[static_cast<std::size_t>(i)], 0.0f);
+    return paContinue;
+}
+#endif
+
+void AudioEngine::audioThreadFunc() {
+#if !(AUDIOENGINE_HAS_PORTAUDIO && AUDIOENGINE_HAS_KISSFFT)
+    // Deps not present in this build environment; keep running but produce zeros.
+    // (Throwing from a std::thread would call std::terminate.)
+    std::vector<float> zeros(static_cast<std::size_t>(logBins), 0.0f);
+    while (running.load()) {
+        {
+            std::lock_guard<std::mutex> lock(logMutex);
+            latestLog = zeros;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    fftInPlace(fftBuf);
+#else
+    PaStream* stream = nullptr;
 
-    // Magnitudes for bins 0..N/2 (inclusive)
-    const float norm = 1.0f / static_cast<float>(fftSize);
-    for (int k = 0; k <= fftSize / 2; ++k) {
-      const float mag = std::abs(fftBuf[static_cast<std::size_t>(k)]) * norm;
-      mags[static_cast<std::size_t>(k)] = mag;
+    Pa_OpenDefaultStream(
+        &stream,
+        1, 0,
+        paFloat32,
+        sampleRate,
+        256,
+        paCallback,
+        this
+    );
+    Pa_StartStream(stream);
+
+    kiss_fftr_cfg cfg = kiss_fftr_alloc(fftSize, 0, nullptr, nullptr);
+
+    std::vector<float> window(static_cast<std::size_t>(fftSize));
+    for (int i = 0; i < fftSize; i++)
+        window[static_cast<std::size_t>(i)] =
+            0.5f - 0.5f * std::cos(2.0f * kPi * static_cast<float>(i) / static_cast<float>(fftSize - 1));
+
+    std::vector<float> block(static_cast<std::size_t>(fftSize));
+    std::vector<kiss_fft_cpx> out(static_cast<std::size_t>(fftSize / 2 + 1));
+    std::vector<float> mag(static_cast<std::size_t>(fftSize / 2));
+
+    while (running.load()) {
+        // Snapshot last fftSize samples from ring buffer into chronological order.
+        const std::size_t w = captureWriteIdx.load(std::memory_order_relaxed);
+        for (int i = 0; i < fftSize; ++i) {
+            const std::size_t idx = (w + static_cast<std::size_t>(i)) % static_cast<std::size_t>(fftSize);
+            block[static_cast<std::size_t>(i)] = captureBuffer[idx];
+        }
+
+        for (int i = 0; i < fftSize; i++)
+            block[static_cast<std::size_t>(i)] *= window[static_cast<std::size_t>(i)];
+
+        kiss_fftr(cfg, block.data(), out.data());
+
+        for (int i = 0; i < fftSize / 2; i++) {
+            const float r = out[static_cast<std::size_t>(i)].r;
+            const float im = out[static_cast<std::size_t>(i)].i;
+            mag[static_cast<std::size_t>(i)] = std::sqrt(r * r + im * im);
+        }
+
+        auto log = LogBins::compute(mag, sampleRate, fftSize, logBins);
+
+        {
+            std::lock_guard<std::mutex> lock(logMutex);
+            latestLog = std::move(log);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    auto logLinear = lb.compute(mags);
-    for (auto& v : logLinear) v = magToMeter(v);
-
-    {
-      std::scoped_lock lk(logMutex);
-      latestLog = std::move(logLinear);
-    }
-
-    std::this_thread::sleep_until(nextTick);
-  }
+    std::free(cfg);
+    Pa_StopStream(stream);
+    Pa_CloseStream(stream);
+#endif
 }
 
 void AudioEngine::initFlac() {

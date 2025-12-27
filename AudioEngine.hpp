@@ -52,6 +52,8 @@ private:
     std::mutex logMutex;
 
     std::vector<float> captureBuffer;
+    std::atomic<std::size_t> captureWriteIdx{0};
+    std::mutex captureMutex;
 
     std::string flacPath;
     bool flacEnabled{false};
