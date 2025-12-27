@@ -37,5 +37,14 @@
 *.out
 *.app
 
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+build/
+
 # debug information files
 *.dwo
