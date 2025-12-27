@@ -124,19 +124,23 @@ static int paCallback(
     if (!in) return paContinue;
 
     // Write to ring buffer (mono).
-    std::size_t writeIdx = eng->captureWriteIdx.load(std::memory_order_relaxed);
-    for (std::size_t i = 0; i < static_cast<std::size_t>(frameCount); i++) {
-        eng->captureBuffer[writeIdx] = in[i];
-        writeIdx = (writeIdx + 1) % static_cast<std::size_t>(eng->fftSize);
+    {
+        std::lock_guard<std::mutex> lock(eng->captureMutex);
+        std::size_t writeIdx = eng->captureWriteIdx.load(std::memory_order_relaxed);
+        for (std::size_t i = 0; i < static_cast<std::size_t>(frameCount); i++) {
+            eng->captureBuffer[writeIdx] = in[i];
+            writeIdx = (writeIdx + 1) % static_cast<std::size_t>(eng->fftSize);
+        }
+        eng->captureWriteIdx.store(writeIdx, std::memory_order_relaxed);
     }
-    eng->captureWriteIdx.store(writeIdx, std::memory_order_relaxed);
 
     if (eng->flacEnabled && eng->flacEncoder) {
-        std::vector<FLAC__int32> pcm(static_cast<std::size_t>(frameCount));
+#if AUDIOENGINE_HAS_FLAC
+        static thread_local std::vector<FLAC__int32> pcm;
+        pcm.resize(static_cast<std::size_t>(frameCount));
         for (std::size_t i = 0; i < static_cast<std::size_t>(frameCount); i++)
             pcm[i] = static_cast<FLAC__int32>(in[i] * 32767.0f);
 
-#if AUDIOENGINE_HAS_FLAC
         FLAC__stream_encoder_process_interleaved(
             eng->flacEncoder, pcm.data(), static_cast<unsigned>(frameCount)
         );
@@ -186,10 +190,14 @@ void AudioEngine::audioThreadFunc() {
 
     while (running.load()) {
         // Snapshot last fftSize samples from ring buffer into chronological order.
-        const std::size_t w = captureWriteIdx.load(std::memory_order_relaxed);
-        for (int i = 0; i < fftSize; ++i) {
-            const std::size_t idx = (w + static_cast<std::size_t>(i)) % static_cast<std::size_t>(fftSize);
-            block[static_cast<std::size_t>(i)] = captureBuffer[idx];
+        {
+            std::lock_guard<std::mutex> lock(captureMutex);
+            const std::size_t w = captureWriteIdx.load(std::memory_order_relaxed);
+            for (int i = 0; i < fftSize; ++i) {
+                const std::size_t idx =
+                    (w + static_cast<std::size_t>(i)) % static_cast<std::size_t>(fftSize);
+                block[static_cast<std::size_t>(i)] = captureBuffer[idx];
+            }
         }
 
         for (int i = 0; i < fftSize; i++)
