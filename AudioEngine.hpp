@@ -1,72 +1,60 @@
 #pragma once
 
 #include <atomic>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
-// A tiny "audio engine" skeleton intended for demos/tests.
-// It does NOT talk to any OS audio API; it simulates a realtime audio callback
-// by generating audio buffers on a background thread at the configured rate.
-//
-// This is useful for demonstrating DSP/analyzers (like LogBins) without pulling
-// in dependencies such as PortAudio/ALSA/CoreAudio.
-class AudioEngine final {
+#if __has_include(<FLAC/stream_encoder.h>)
+#include <FLAC/stream_encoder.h>
+#define AUDIOENGINE_HAS_FLAC 1
+#else
+// Allow building without libFLAC headers installed.
+#define AUDIOENGINE_HAS_FLAC 0
+struct FLAC__StreamEncoder;
+#endif
+
+class AudioEngine {
 public:
-  struct Config {
-    int sampleRate = 48000;
-    int channels = 1;
-    std::size_t framesPerBuffer = 1024;
-  };
+    AudioEngine(
+        int sampleRate,
+        int fftSize,
+        int logBins,
+        const std::string& flacOutputPath = ""
+    );
 
-  using Analyzer = std::function<void(const float* interleaved,
-                                      std::size_t frames,
-                                      int channels,
-                                      int sampleRate)>;
+    ~AudioEngine();
 
-  explicit AudioEngine(Config cfg = {});
-  ~AudioEngine();
+    void start();
+    void stop();
 
-  AudioEngine(const AudioEngine&) = delete;
-  AudioEngine& operator=(const AudioEngine&) = delete;
-
-  // Starts the simulation thread. Safe to call multiple times.
-  void start();
-
-  // Stops the simulation thread. Safe to call multiple times.
-  void stop();
-
-  bool isRunning() const noexcept { return m_running.load(); }
-  const Config& config() const noexcept { return m_cfg; }
-
-  // Simple signal generator parameters (sine wave).
-  void setToneHz(double hz);
-  void setAmplitude(double amp01);
-
-  // Adds an analyzer that is invoked once per buffer.
-  // Analyzers must be thread-safe and non-blocking in real engines; here we
-  // still recommend keeping them fast.
-  void addAnalyzer(Analyzer analyzer);
-  void clearAnalyzers();
+    std::vector<float> getLogBins();             // 64/128 bins, call every 200 ms
+    std::vector<float> getLogBinCenters() const; // center frequency per bin
 
 private:
-  void runThread_();
+    void audioThreadFunc();
+    void initFlac();
+    void closeFlac();
 
-  Config m_cfg;
+    std::vector<std::pair<float,float>> computeLogBinFreqs() const;
 
-  std::atomic<bool> m_running{false};
-  std::thread m_thread;
+private:
+    int sampleRate;
+    int fftSize;
+    int logBins;
 
-  // Generator state
-  std::mutex m_genMutex;
-  double m_toneHz = 440.0;
-  double m_amp = 0.2;
-  double m_phase = 0.0;
+    std::thread audioThread;
+    std::atomic<bool> running{false};
 
-  std::mutex m_analyzersMutex;
-  std::vector<Analyzer> m_analyzers;
+    std::vector<float> latestLog;
+    std::mutex logMutex;
+
+    std::vector<float> captureBuffer;
+
+    std::string flacPath;
+    bool flacEnabled{false};
+    FLAC__StreamEncoder* flacEncoder{nullptr};
 };
 
