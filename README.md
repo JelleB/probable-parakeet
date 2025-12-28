@@ -1,5 +1,7 @@
 # probable-parakeet
 
+For my daughter: you are deeply loved.
+
 ## Build + run (C++)
 
 ```bash

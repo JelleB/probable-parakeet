@@ -6,6 +6,9 @@
 #include "AudioEngine.hpp"
 #include "WebSocketServer.hpp"
 
+// For my daughter:
+// May this little demo always remind you that you are deeply loved.
+
 static std::string jsonArray(const std::vector<float>& v) {
     std::ostringstream oss;
     oss << '[';
