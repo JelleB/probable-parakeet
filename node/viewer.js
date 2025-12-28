@@ -2,6 +2,9 @@ import WebSocket from "ws";
 import asciichart from "asciichart";
 
 const url = process.env.WS_URL ?? "ws://127.0.0.1:8787";
+const daughter = process.env.DAUGHTER_NAME ?? "Meike";
+const age = Number(process.env.DAUGHTER_AGE ?? "7");
+const hearts = "❤️".repeat(40);
 
 let centers = null;
 
@@ -25,6 +28,9 @@ ws.on("message", (buf) => {
   // Render bins as an ASCII chart.
   // (Values are raw log-bin averages from the C++ side.)
   process.stdout.write("\x1b[2J\x1b[H"); // clear screen, home
+  process.stdout.write(`${hearts}\n`);
+  process.stdout.write(`For ${daughter} (${Number.isFinite(age) ? age : "?"}) — with lots of love\n`);
+  process.stdout.write(`${hearts}\n\n`);
   process.stdout.write(`Audio log bins (${msg.bins.length})\n`);
 
   // Downsample slightly for terminal width if needed.
@@ -41,6 +47,8 @@ ws.on("message", (buf) => {
     const hi = centers[centers.length - 1]?.toFixed?.(1) ?? "?";
     process.stdout.write(`Centers: ${lo} Hz .. ${hi} Hz\n`);
   }
+
+  process.stdout.write(`\n${"💖".repeat(24)}\n`);
 });
 
 ws.on("close", () => {
