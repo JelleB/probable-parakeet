@@ -10,6 +10,7 @@ find_package(Threads REQUIRED)
 
 add_library(audio_engine
   AudioEngine.cpp
+  WebSocketServer.cpp
 )
 target_include_directories(audio_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(audio_engine PUBLIC Threads::Threads)
