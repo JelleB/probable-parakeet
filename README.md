@@ -23,6 +23,20 @@ npm install
 node viewer.js
 ```
 
+## Waterfall view (browser, Chart.js v3)
+
+1) Start the C++ demo so it serves WebSocket on `ws://127.0.0.1:8787`.
+
+2) In another terminal:
+
+```bash
+cd node
+npm install
+npm run waterfall
+```
+
+Open the printed URL (defaults to `http://127.0.0.1:8080/waterfall/`).
+
 If needed:
 
 ```bash
