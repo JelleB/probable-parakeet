@@ -1,5 +1,11 @@
 # probable-parakeet
 
+## Notice (AI-generated)
+
+All code in this repository has been generated with AI assistance.
+
+For traceability, the prompts/requirements that led to this version are recorded in `PROMPTS.md`.
+
 For my daughter Meike (7): you are deeply loved. ❤️❤️❤️❤️❤️
 
 ## Build + run (C++)
