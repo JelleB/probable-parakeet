@@ -37,5 +37,18 @@
 *.out
 *.app
 
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+build/
+
+# Node
+node_modules/
+npm-debug.log*
+
 # debug information files
 *.dwo

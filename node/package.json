@@ -1,0 +1,14 @@
+{
+  "name": "audio-logbins-viewer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "waterfall": "node server.js",
+    "terminal": "node viewer.js"
+  },
+  "dependencies": {
+    "asciichart": "^1.5.25",
+    "ws": "^8.18.3"
+  }
+}
+
